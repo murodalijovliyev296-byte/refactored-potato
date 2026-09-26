@@ -12,6 +12,8 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@kanalingiz_username")
 CARD_NUMBER = os.environ.get("CARD_NUMBER", "8600 0000 0000 0000")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "mehnat_uz_ish_bot")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "adminusername")
+SUPPORT_PHONE = os.environ.get("SUPPORT_PHONE", "+998901234567")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
@@ -128,8 +130,47 @@ def get_application(app_id):
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("✏️ Ma'lumotlarni o'zgartirish")
-    kb.row("📢 Ishlarni ko'rish")
+    kb.row("📋 Mening arizalarim")
+    kb.row("🆘 Qo'llab-quvvatlash")
     return kb
+
+
+def status_label(s):
+    return {
+        "waiting_payment": "⏳ To'lov kutilmoqda",
+        "checking": "🔎 Tekshirilmoqda",
+        "approved": "✅ Tasdiqlangan",
+        "rejected": "❌ Rad etilgan",
+        "cancelled": "🚫 Bekor qilingan",
+        "expired": "⏱ Muddati tugagan",
+    }.get(s, s)
+
+
+def get_user_applications(user_id):
+    conn = db()
+    rows = conn.execute(
+        "SELECT a.app_id, a.status, j.title FROM applications a "
+        "JOIN jobs j ON j.job_id = a.job_id WHERE a.user_id=? ORDER BY a.app_id DESC",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+@bot.message_handler(func=lambda m: m.text == "📋 Mening arizalarim")
+def my_applications(message):
+    uid = message.chat.id
+    apps = get_user_applications(uid)
+    if not apps:
+        bot.send_message(uid, "Sizda hali arizalar yo'q.")
+        return
+    for a in apps:
+        text = f"💼 {a['title']}\nHolat: {status_label(a['status'])}"
+        markup = None
+        if a["status"] in ("waiting_payment", "checking"):
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("❌ Ishni bekor qilish", callback_data=f"cancel_{a['app_id']}"))
+        bot.send_message(uid, text, reply_markup=markup)
 
 
 def ask_name(chat_id):
@@ -219,20 +260,11 @@ def edit_profile(message):
     ask_name(message.chat.id)
 
 
-@bot.message_handler(func=lambda m: m.text == "📢 Ishlarni ko'rish")
-def view_jobs(message):
+@bot.message_handler(func=lambda m: m.text == "🆘 Qo'llab-quvvatlash")
+def support(message):
     uid = message.chat.id
-    conn = db()
-    jobs = conn.execute("SELECT * FROM jobs ORDER BY job_id DESC LIMIT 10").fetchall()
-    conn.close()
-    if not jobs:
-        bot.send_message(uid, "Hozircha ishlar yo'q.")
-        return
-    for j in jobs:
-        text = f"💼 {j['title']}\n📍 {j['location']}\n💰 {j['salary']}"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("✅ Ishga yozilish", callback_data=f"apply_{j['job_id']}"))
-        bot.send_message(uid, text, reply_markup=markup)
+    text = f"👤 Admin: @{ADMIN_USERNAME}\n📞 Telefon: {SUPPORT_PHONE}"
+    bot.send_message(uid, text)
 
 
 def show_job(uid, job_id):
@@ -251,160 +283,4 @@ def addjob(message):
     if message.chat.id != ADMIN_ID:
         return
     state[ADMIN_ID] = {"step": "job_title", "data": {}}
-    bot.send_message(ADMIN_ID, "💼 Ish nomini kiriting:")
-
-
-@bot.message_handler(func=lambda m: m.chat.id == ADMIN_ID and state.get(ADMIN_ID, {}).get("step") == "job_title")
-def job_title(message):
-    state[ADMIN_ID]["data"]["title"] = message.text.strip()
-    state[ADMIN_ID]["step"] = "job_location"
-    bot.send_message(ADMIN_ID, "📍 Ish joyi manzilini kiriting:")
-
-
-@bot.message_handler(func=lambda m: m.chat.id == ADMIN_ID and state.get(ADMIN_ID, {}).get("step") == "job_location")
-def job_location(message):
-    state[ADMIN_ID]["data"]["location"] = message.text.strip()
-    state[ADMIN_ID]["step"] = "job_salary"
-    bot.send_message(ADMIN_ID, "💰 Ish haqi va ish vaqtini kiriting (masalan: 3 mln so'm, 9:00-18:00):")
-
-
-@bot.message_handler(func=lambda m: m.chat.id == ADMIN_ID and state.get(ADMIN_ID, {}).get("step") == "job_salary")
-def job_salary(message):
-    state[ADMIN_ID]["data"]["salary"] = message.text.strip()
-    state[ADMIN_ID]["step"] = "job_phone"
-    bot.send_message(ADMIN_ID, "📞 Ish beruvchi telefon raqamini kiriting:")
-
-
-@bot.message_handler(func=lambda m: m.chat.id == ADMIN_ID and state.get(ADMIN_ID, {}).get("step") == "job_phone")
-def job_phone(message):
-    d = state[ADMIN_ID]["data"]
-    d["phone"] = message.text.strip()
-    job_id = add_job(d["title"], d["location"], d["salary"], d["phone"])
-    state.pop(ADMIN_ID, None)
-
-    text = f"💼 {d['title']}\n📍 {d['location']}\n💰 {d['salary']}"
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton(
-        "✅ Ishga yozilish",
-        url=f"https://t.me/{BOT_USERNAME}?start=job_{job_id}",
-    ))
-    bot.send_message(CHANNEL_ID, text, reply_markup=markup)
-    bot.send_message(ADMIN_ID, "✅ Ish e'lon qilindi va kanalga joylandi.")
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("apply_"))
-def apply_job(call):
-    uid = call.from_user.id
-    job_id = int(call.data.replace("apply_", ""))
-    if not is_registered(uid):
-        state[uid] = {"step": "reg_name", "data": {}, "pending_job": job_id}
-        bot.send_message(uid, "Avval ro'yxatdan o'ting.\n👤 Ismingizni kiriting:")
-        bot.answer_callback_query(call.id)
-        return
-
-    app_id = create_application(job_id, uid)
-    text = (
-        f"💳 To'lov uchun karta: {CARD_NUMBER}\n\n"
-        f"To'lovni amalga oshirib, chekni (screenshot yoki rasm) shu yerga yuboring.\n"
-        f"⏱ Sizda 3 daqiqa vaqt bor, aks holda ariza avtomatik bekor qilinadi."
-    )
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("❌ Ishni bekor qilish", callback_data=f"cancel_{app_id}"))
-    bot.send_message(uid, text, reply_markup=markup)
-    state[uid] = {"step": "waiting_receipt", "app_id": app_id}
-    bot.answer_callback_query(call.id)
-
-    threading.Timer(180, expire_application, args=(uid, app_id)).start()
-
-
-def expire_application(uid, app_id):
-    a = get_application(app_id)
-    if a and a["status"] == "waiting_payment":
-        update_application_status(app_id, "expired")
-        if state.get(uid, {}).get("app_id") == app_id:
-            state.pop(uid, None)
-        try:
-            bot.send_message(uid, "⏱ Vaqt tugadi, ariza bekor qilindi. Qayta urinib ko'rishingiz mumkin.")
-        except Exception:
-            pass
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("cancel_"))
-def cancel_application(call):
-    uid = call.from_user.id
-    app_id = int(call.data.replace("cancel_", ""))
-    a = get_application(app_id)
-    if a and a["status"] == "waiting_payment":
-        update_application_status(app_id, "cancelled")
-        state.pop(uid, None)
-        bot.send_message(uid, "❌ Ariza bekor qilindi.")
-    bot.answer_callback_query(call.id)
-
-
-@bot.message_handler(content_types=["photo"])
-def receive_receipt(message):
-    uid = message.chat.id
-    st = state.get(uid)
-    if not st or st.get("step") != "waiting_receipt":
-        return
-    app_id = st["app_id"]
-    a = get_application(app_id)
-    if not a or a["status"] != "waiting_payment":
-        bot.send_message(uid, "Bu ariza uchun vaqt tugagan yoki bekor qilingan.")
-        return
-
-    update_application_status(app_id, "checking")
-    state.pop(uid, None)
-
-    job = get_job(a["job_id"])
-    user = get_user(uid)
-    caption = (
-        f"🧾 Yangi chek (ariza #{app_id})\n"
-        f"👤 {user['name']}, {user['age']} yosh\n"
-        f"📞 {user['phone']}\n"
-        f"💼 Ish: {job['title']}"
-    )
-    markup = types.InlineKeyboardMarkup()
-    markup.add(
-        types.InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"payok_{app_id}"),
-        types.InlineKeyboardButton("❌ Rad etish", callback_data=f"payno_{app_id}"),
-    )
-    bot.send_photo(ADMIN_ID, message.photo[-1].file_id, caption=caption, reply_markup=markup)
-    bot.send_message(uid, "✅ Chek qabul qilindi, admin tekshirmoqda...")
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith(("payok_", "payno_")))
-def admin_review_payment(call):
-    action, app_id_str = call.data.split("_")
-    app_id = int(app_id_str)
-    a = get_application(app_id)
-    if not a:
-        bot.answer_callback_query(call.id, "Topilmadi.")
-        return
-
-    job = get_job(a["job_id"])
-    uid = a["user_id"]
-
-    if action == "payok":
-        update_application_status(app_id, "approved")
-        bot.send_message(uid, f"🎉 To'lovingiz tasdiqlandi!\n📞 Ish beruvchi raqami: {job['employer_phone']}")
-        bot.edit_message_caption(f"✅ TASDIQLANDI (#{app_id})", call.message.chat.id, call.message.message_id)
-    else:
-        update_application_status(app_id, "rejected")
-        bot.send_message(uid, "❌ To'lovingiz tasdiqlanmadi. Qayta urinib ko'ring yoki admin bilan bog'laning.")
-        bot.edit_message_caption(f"❌ RAD ETILDI (#{app_id})", call.message.chat.id, call.message.message_id)
-
-    bot.answer_callback_query(call.id, "Qabul qilindi.")
-
-
-@bot.message_handler(func=lambda m: m.chat.id == ADMIN_ID and m.chat.id not in state, content_types=["text"])
-def admin_direct_post(message):
-    if message.text.startswith("/"):
-        return
-    bot.send_message(CHANNEL_ID, message.text)
-    bot.reply_to(message, "✅ To'g'ridan-to'g'ri kanalga joylandi.")
-
-
-print("Bot ishga tushdi...")
-threading.Thread(target=run_web_server).start()
-bot.infinity_polling()
+   
